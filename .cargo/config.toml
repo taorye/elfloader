@@ -1,0 +1,8 @@
+[target.riscv32imafc-unknown-none-elf]
+
+[build]
+# Pick ONE of these compilation targets
+target = "riscv32imafc-unknown-none-elf.json" # riscv32-imafc
+
+[unstable]
+build-std = ["core", "alloc"]
