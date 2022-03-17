@@ -37,10 +37,14 @@ use core::ptr;
 use core::slice;
 #[no_mangle]
 pub unsafe extern "C" fn rust_elf_load(elf_buf: *const u8) -> *const ElfModule {
-    ELFFile::parse(elf_buf)
-        .ok()
-        .and_then(|elf_file| ELF_MODULE_ROOT.load_elf_file(&elf_file))
-        .unwrap_or(ptr::null())
+    match ELFFile::parse(elf_buf) {
+        Ok(elf_file) => ELF_MODULE_ROOT.load_elf_file(&elf_file),
+        Err(err) => {
+            println!("Elf parse err:{:?}", err);
+            None
+        }
+    }
+    .unwrap_or(ptr::null())
 }
 
 /* ensure symbol_name is valid str */
@@ -60,6 +64,11 @@ pub unsafe extern "C" fn rust_elf_sym(
 #[no_mangle]
 pub unsafe extern "C" fn rust_elf_unload(elf_module: *const ElfModule) {
     ELF_MODULE_ROOT.unload_elf_module(elf_module);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rust_elf_modules() {
+    println!("{:?}", ELF_MODULE_ROOT);
 }
 
 unsafe fn cstr2ruststr<'a>(s: *const u8) -> &'a str {

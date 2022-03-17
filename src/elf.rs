@@ -2,6 +2,7 @@ pub mod headers;
 pub mod section;
 
 use alloc::vec::Vec;
+use core::ops::BitAnd;
 use core::ptr;
 use core::slice;
 
@@ -74,7 +75,7 @@ impl ELFFile {
                                     .offset(s.st_name as isize),
                             )
                         };
-                        println!("SHN_UNDEF: name={} {:#x}", sym_name, s.st_value);
+                        // println!("SHN_UNDEF: name={} {:#x}", sym_name, s.st_value);
                         sym_name
                     })
             })
@@ -164,30 +165,40 @@ impl ELFFile {
     pub unsafe fn relocateadd(rela: &Rela, sym: &Symbol, addr: *mut u8) {
         use RelaType::*;
         let rtype = &rela.rela_type();
-        println!(
-            "{:?} @{:p} [{:08x}] to sym@{:p} [{:#x}]",
+        print!(
+            "{:?} @{:p} [{:08x}] to sym@{:p}",
             rtype,
             addr,
             (addr as *mut u32).read_unaligned(),
-            sym,
-            sym.st_value,
+            sym.st_value as *const u32,
         );
         match rtype {
             RELAX => {}
-            RISCV_32 | RISCV_64 => {
-                (addr as *mut u32)
-                    .write_unaligned((sym.symbol_value() as isize + rela.rela_addend()) as u32);
+            RISCV_32 => {
+                (addr as *mut u32).write_unaligned(
+                    (sym.symbol_value() as *const u8).wrapping_offset(rela.rela_addend()) as u32,
+                );
+                println!("");
+            }
+            RISCV_64 => {
+                (addr as *mut u64).write_unaligned(
+                    (sym.symbol_value() as *const u8).wrapping_offset(rela.rela_addend()) as u64,
+                );
+                println!("");
             }
             PCREL_LO12_I | PCREL_LO12_S => {
+                println!("              ^")
                 /* NOTE: imm value for mv has been adjusted in previous HI20 */
             }
             PCREL_HI20 | CALL | CALL_PLT => {
-                let offset = sym.symbol_value() as isize - addr as isize;
-                let hi20 = ((offset + 0x800) as usize & 0xfffff000) as isize;
-                let lo12 = (offset - hi20) & 0xfff;
+                let offset =
+                    (sym.symbol_value() as *const u8).offset_from(addr as *const u8) as usize;
+                let hi20 = offset.wrapping_add(0x800) & 0xfffff000;
+                let lo12 = offset.wrapping_sub(hi20) & 0xfff;
                 /* Adjust auipc (add upper immediate to pc) : 20bit */
                 (addr as *mut u32)
                     .write_unaligned(((addr as *mut u32).read_unaligned() & 0xfff) | (hi20 as u32));
+                println!(" [{:08x}][{:08x}]", (addr as *mut u32).read_unaligned(),(addr as *mut u32).offset(1).read_unaligned());
                 /* Adjust remain 12bit */
                 match (addr as *mut u32).offset(1).read_unaligned() & 0x7f {
                     // OPCODE_SW       0x23
@@ -213,7 +224,7 @@ impl ELFFile {
                 }
             }
             BRANCH => {
-                let offset = sym.symbol_value() as isize - addr as isize;
+                let offset = (sym.symbol_value() as *const u8).offset_from(addr as *const u8) as usize;
                 /* P.23 Conditinal Branches : B type (imm=12bit) 0xfe000f80 */
                 let val = (addr as *mut u32).read_unaligned() & 0xfe000f80;
                 let imm12 = (offset as u32 & 0x1000) << (31 - 12);
@@ -222,36 +233,40 @@ impl ELFFile {
                 let imm4_1 = (offset as u32 & 0x1e) << (11 - 4);
 
                 assert_eq!(val, imm12 | imm11 | imm10_5 | imm4_1);
-
+                
+                println!(" [{:08x}]", (addr as *mut u32).read_unaligned());
                 println!(
-                    "offset for Bx={} ({:#x}) (val={:#x})already set!",
+                    "\toffset for Bx={} ({:#x}) (val={:#x})already set!",
                     offset, offset, val
                 );
             }
             HI20 => {
-                let hi20 = (sym.symbol_value() + 0x800 & 0xfffff000) as isize;
+                let hi20 = (sym.symbol_value().wrapping_add(0x800) >> 12) << 12;
                 (addr as *mut u32)
                     .write_unaligned(((addr as *mut u32).read_unaligned() & 0xfff) | (hi20 as u32));
+                println!(" [{:08x}]", (addr as *mut u32).read_unaligned());
             }
             LO12_I => {
-                let hi20 = (sym.symbol_value() + 0x800 & 0xfffff000) as isize;
-                let lo12 = (sym.symbol_value() as isize - hi20) & 0xfff;
+                let hi20 = sym.symbol_value().wrapping_add(0x800) & 0xfffff000;
+                let lo12 = sym.symbol_value().wrapping_sub(hi20) & 0xfff;
                 (addr as *mut u32).write_unaligned(
-                    ((addr as *mut u32).read_unaligned() & 0xfff) | ((lo12 << 20) as u32),
+                    ((addr as *mut u32).read_unaligned() & 0xfffff) | ((lo12 << 20) as u32),
                 );
+                println!(" [{:08x}]", (addr as *mut u32).read_unaligned());
             }
             LO12_S => {
-                let hi20 = (sym.symbol_value() + 0x800 & 0xfffff000) as isize;
-                let lo12 = (sym.symbol_value() as isize - hi20) & 0xfff;
+                let hi20 = sym.symbol_value().wrapping_add(0x800) & 0xfffff000;
+                let lo12 = sym.symbol_value().wrapping_sub(hi20) & 0xfff;
                 /* Adjust imm for SW : S-type */
                 let imm11_5 = ((lo12 & 0xfe0) << (31 - 11)) as u32;
                 let imm4_0 = ((lo12 & 0x1f) << (11 - 4)) as u32;
                 (addr as *mut u32).write_unaligned(
                     ((addr as *mut u32).read_unaligned() & 0x1fff07f) | imm11_5 | imm4_0,
                 );
+                println!(" [{:08x}]", (addr as *mut u32).read_unaligned());
             }
             RVC_JUMP => {
-                let offset = sym.symbol_value() as isize - addr as isize;
+                let offset = (sym.symbol_value() as *const u8).offset_from(addr as *const u8) as usize;
                 /* P.111 Table 16.6 : Instruction listings for RVC 0x1ffc */
                 let val = (addr as *mut u16).read_unaligned() & 0x1ffc;
                 let imm11 = (offset as u16 & 0x800) << (12 - 11);
@@ -268,13 +283,14 @@ impl ELFFile {
                     imm11 | imm10 | imm9_8 | imm7 | imm6 | imm5 | imm4 | imm3_1
                 );
 
+                println!(" [{:04x}]", (addr as *mut u16).read_unaligned());
                 println!(
-                    "offset for C.J={} ({:#x}) (val={:#x})already set!",
+                    "\toffset for C.J={} ({:#x}) (val={:#x})already set!",
                     offset, offset, val
                 );
             }
             RVC_BRANCH => {
-                let offset = sym.symbol_value() as isize - addr as isize;
+                let offset = (sym.symbol_value() as *const u8).offset_from(addr as *const u8) as usize;
                 /* P.111 Table 16.6 : Instruction listings for RVC 0x1c7c */
                 let val = (addr as *mut u16).read_unaligned() & 0x1c7c;
                 let imm8 = (offset as u16 & 0x100) << (12 - 8);
@@ -285,8 +301,9 @@ impl ELFFile {
 
                 assert_eq!(val, imm8 | imm7_6 | imm5 | imm4_3 | imm2_1);
 
+                println!(" [{:04x}]", (addr as *mut u16).read_unaligned());
                 println!(
-                    "offset for C.Bx={} ({:#x}) (val={:#x})already set!",
+                    "\toffset for C.Bx={} ({:#x}) (val={:#x})already set!",
                     offset, offset, val
                 );
             }

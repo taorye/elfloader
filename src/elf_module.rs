@@ -14,6 +14,7 @@ use crate::elf::headers::{SHFlags, SHType};
 use crate::elf::section::{Rela, STBind, Symbol};
 use crate::elf::ELFFile;
 
+#[derive(Debug)]
 pub struct ElfModuleRoot {
     pub modules: LinkedList<rc::Rc<RefCell<ElfModule>>>,
 }
@@ -34,7 +35,8 @@ impl ElfModuleRoot {
 
         /* return None while can't find undefined */
         if und_syms.iter().any(|us| us.1 .0.is_null()) {
-            println!("[err]undefined symbol can't be resolved");
+            println!("{:?}", und_syms);
+            println!("[failed]undefined symbol can't be resolved");
             return None;
         }
 
@@ -43,7 +45,7 @@ impl ElfModuleRoot {
             .iter()
             .any(|name| self.find_symbol(name).is_some())
         {
-            println!("[err]global symbol has conflict");
+            println!("[failed]global symbol has conflict");
             return None;
         }
 
@@ -60,9 +62,21 @@ impl ElfModuleRoot {
             .relocate_symbols_with(&elf_file);
 
         self.modules.push_back(rc::Rc::new(RefCell::new(em)));
-        self.modules
-            .back()
-            .and_then(|rcmod| Some(rcmod.as_ptr() as *const ElfModule))
+        self.modules.back().and_then(|rcem| {
+            rcem.borrow()
+                .dependencies
+                .iter()
+                .map(|pm| {
+                    Some(pm.upgrade().and_then(|spm| {
+                        Some((*spm).borrow_mut().dependents.push(rc::Rc::clone(&rcem)))
+                    }))
+                })
+                .count();
+
+            rcem.borrow().print_text_and_data();
+
+            Some(rcem.as_ptr() as *const ElfModule)
+        })
     }
 
     pub fn unload_elf_module(&mut self, elf_module: *const ElfModule) {
@@ -78,7 +92,8 @@ impl ElfModuleRoot {
                         .map(|weakpm| {
                             weakpm.upgrade().and_then(|pm| {
                                 Some(
-                                    pm.borrow_mut()
+                                    (*pm)
+                                        .borrow_mut()
                                         .dependents
                                         .retain(|m| m.as_ptr() as usize != elf_module as usize),
                                 )
@@ -109,6 +124,7 @@ impl ElfModuleRoot {
     }
 }
 
+#[derive(Debug)]
 pub struct ElfModule {
     pub dependents: Vec<rc::Rc<RefCell<Self>>>,
     pub dependencies: Vec<rc::Weak<RefCell<Self>>>,
@@ -188,7 +204,7 @@ impl ElfModule {
                 d.1.size()
             ))
         });
-        em.print_text_and_data();
+        // em.print_text_and_data();
         em
     }
 
@@ -203,7 +219,10 @@ impl ElfModule {
                 em.symbol_info
                     .entry(Box::leak(symname.to_string().into_boxed_str()))
                     .or_insert(symvalue);
-                em.dependencies.push(pm)
+                em.dependencies
+                    .iter()
+                    .all(|p| !pm.ptr_eq(p))
+                    .then(|| em.dependencies.push(pm))
             })
             .count();
         em
@@ -211,7 +230,7 @@ impl ElfModule {
 
     pub fn load_into_memory(self, elf_file: &ELFFile) -> Self {
         /* load section data into memory */
-        println!("[trying]Load section data into memory");
+        // println!("[trying]Load section data into memory");
         let shstrtab = &elf_file.section_headers()[elf_file.elf_header().e_shstrndx as usize];
         elf_file
             .section_headers()
@@ -269,13 +288,13 @@ impl ElfModule {
                 cur_tdoff
             });
         println!("[success]Load section data into memory");
-        self.print_text_and_data();
+        // self.print_text_and_data();
         self
     }
 
     pub fn update_symbol_value_with(self, elf_file: &ELFFile) -> Self {
         /* update symbol value */
-        println!("[trying]update symbol value");
+        // println!("[trying]update symbol value");
         elf_file
             .section_headers()
             .iter()
@@ -340,7 +359,7 @@ impl ElfModule {
                             }
                         }
                     }
-                    println!("    {:?}", s);
+                    // println!("    {:?}", s);
                 })
             })
             .count();
@@ -350,7 +369,7 @@ impl ElfModule {
 
     pub fn relocate_symbols_with(self, elf_file: &ELFFile) -> Self {
         /* relocate text and data */
-        println!("[trying]relocate text and data");
+        // println!("[trying]relocate text and data");
         elf_file
             .section_headers()
             .iter()
